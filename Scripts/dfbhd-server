@@ -1,0 +1,58 @@
+#!/bin/sh
+# Start the Delta Force: Black Hawk Down dedicated server (START_EXE).
+#
+# Runs `dfbhd.exe /autorestart [START_ARGS]` from the game folder under Wine and Xvfb. With
+# /autorestart the game skips its menus and hosts the game saved in autores.bin, which the
+# configure hook builds from the DFBHD_* settings. The game has no console output; its graphics
+# and mission log (ghw.txt, rewritten on every start) is followed to stdout.
+#
+# When the game crashes it writes SYSDUMP.TXT and then waits on a "SYSDUMP.TXT saved" message
+# box that nobody can click. The launcher watches for that file, prints it, and exits non-zero so
+# the container's restart policy can take over.
+set -e
+
+root="${SERVER_ROOT:-/config/Merged}"
+cd "$root"
+
+if [ ! -f dfbhd.exe ]; then
+    echo "dfbhd.exe not found in $root. Put a Delta Force: Black Hawk Down install in /config/Server or set DFBHD_ARCHIVE_URL." >&2
+    exit 1
+fi
+if [ ! -f autores.bin ]; then
+    echo "autores.bin not found in $root; the configure hook didn't write it (see the log above)." >&2
+    exit 1
+fi
+
+rm -f SYSDUMP.TXT ghw.txt
+
+set -- dfbhd.exe /autorestart "$@"
+printf 'Starting: %s\n' "$*"
+
+tail -n +1 -F ghw.txt 2>/dev/null &
+tail_pid=$!
+
+export WINE_XVFB="${WINE_XVFB:-true}"
+wine-run "$@" &
+game_pid=$!
+
+stop() {
+    wineserver -k 2>/dev/null || true
+    kill "$game_pid" "$tail_pid" 2>/dev/null || true
+}
+trap 'stop; exit 0' TERM INT
+
+while kill -0 "$game_pid" 2>/dev/null; do
+    if [ -f SYSDUMP.TXT ]; then
+        sleep 1
+        echo "dfbhd.exe crashed:" >&2
+        head -n 12 SYSDUMP.TXT >&2
+        stop
+        exit 1
+    fi
+    sleep 5
+done
+
+status=0
+wait "$game_pid" || status=$?
+kill "$tail_pid" 2>/dev/null || true
+exit "$status"
